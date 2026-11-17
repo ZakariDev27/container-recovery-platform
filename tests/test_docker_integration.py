@@ -111,3 +111,89 @@ class DockerRecoveryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+POSTGRES = os.environ.get("CRP_POSTGRES_TESTS") == "1"
+PG_IMAGE = os.environ.get("CRP_POSTGRES_IMAGE", "postgres:16-alpine")
+PGDATA = "/var/lib/postgresql/data"
+
+
+@unittest.skipUnless(POSTGRES, "set CRP_POSTGRES_TESTS=1 to run the PostgreSQL recovery test")
+class PostgresRecoveryTest(unittest.TestCase):
+    """A real database: back it up, destroy its data directory, get the rows back."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tag = uuid.uuid4().hex[:8]
+        self.name = f"pg{tag}"
+        self.volume = f"crp-pg-{tag}"
+        config = cfg.parse(
+            {
+                "platform": {"state_dir": "state", "backup_dir": "backups", "helper_image": IMAGE},
+                "services": {
+                    self.name: {
+                        "image": PG_IMAGE,
+                        "env": {"POSTGRES_PASSWORD": "integration-test"},
+                        "volumes": [f"{self.volume}:{PGDATA}"],
+                        "health": {
+                            "type": "exec",
+                            "command": ["pg_isready", "-U", "postgres", "-h", "127.0.0.1"],
+                            "failure_threshold": 2,
+                            "start_timeout": 90,
+                        },
+                        "recovery": {"restore_storage_after": 1, "stop_timeout": 20},
+                        "backup": {
+                            "pause": True,
+                            "verify_command": ["test", "-f", f"{PGDATA}/PG_VERSION"],
+                        },
+                    }
+                },
+            },
+            base=Path(tmp.name),
+        )
+        self.runtime = DockerRuntime(IMAGE)
+        self.sup = Supervisor(config, self.runtime)
+        self.service = config.service(self.name)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for name in self.runtime.list_names(self.service.container_name):
+            self.runtime.remove(name)
+        subprocess.run(["docker", "volume", "rm", "-f", self.volume], capture_output=True)
+
+    def _psql(self, sql: str) -> str:
+        proc = subprocess.run(
+            ["docker", "exec", self.service.container_name,
+             "psql", "-U", "postgres", "-h", "127.0.0.1", "-tAc", sql],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.strip()
+
+    def test_database_survives_loss_of_its_data_directory(self):
+        sup, svc = self.sup, self.service
+        self.assertTrue(sup.up()[self.name])
+        self._psql("CREATE TABLE orders (id int PRIMARY KEY, note text)")
+        self._psql("INSERT INTO orders SELECT g, 'order ' || g FROM generate_series(1, 5000) g")
+        self.assertEqual(self._psql("SELECT count(*) FROM orders"), "5000")
+
+        # Backup of the live database (container paused during the copy), restore-tested.
+        record = sup.storage.backup(svc)
+        self.assertTrue(record.verified, record.verify_detail)
+        self.assertEqual(sup.tick()[self.name], "healthy")
+        self._psql("INSERT INTO orders VALUES (999999, 'written after the backup')")
+
+        # Disaster: the control file is gone and the server dies.
+        subprocess.run(["docker", "exec", svc.container_name, "rm", f"{PGDATA}/global/pg_control"],
+                       check=True, capture_output=True)
+        subprocess.run(["docker", "kill", svc.container_name], check=True, capture_output=True)
+
+        # A fresh container cannot start on a broken data directory...
+        self.assertEqual(sup.tick()[self.name], "replace-failed")
+        # ...so the volume is restored from the tested backup and the database comes back.
+        self.assertEqual(sup.tick()[self.name], "replaced")
+        self.assertIn("storage_restored", sup.events.kinds(self.name))
+        self.assertEqual(sup.tick()[self.name], "healthy")
+        self.assertEqual(self._psql("SELECT count(*) FROM orders"), "5000")
+        self.assertEqual(self._psql("SELECT note FROM orders WHERE id = 4242"), "order 4242")

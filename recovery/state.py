@@ -84,6 +84,7 @@ class EventLog:
         self.path = path
         self.clock = clock
         self.events: list[dict] = []
+        self.listeners: list[Callable[[dict], None]] = []
 
     def emit(self, kind: str, service: str, **fields) -> dict:
         event = {"time": round(self.clock(), 3), "event": kind, "service": service, **fields}
@@ -94,6 +95,11 @@ class EventLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a") as fh:
                 fh.write(json.dumps(event) + "\n")
+        for listener in self.listeners:
+            try:
+                listener(event)
+            except Exception as exc:  # a broken listener must not break recovery
+                log.warning("event listener failed: %s", exc)
         return event
 
     def kinds(self, service: str | None = None) -> list[str]:

@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Callable
 
+from .alerts import DEFAULT_EVENTS, WebhookNotifier
 from .config import Config, Service
 from .health import check as default_check
 from .replacer import Checker, Replacer
@@ -41,6 +42,10 @@ class Supervisor:
         self.checker = checker
         self.clock = clock
         self.events = events or EventLog(config.state_dir / "events.jsonl", clock)
+        if config.alert_webhook:
+            self.events.listeners.append(
+                WebhookNotifier(config.alert_webhook, config.alert_events or DEFAULT_EVENTS)
+            )
         self.state = StateStore(config.state_dir / "state.json")
         self.storage = StorageManager(config, runtime, self.events, clock)
         self.replacer = Replacer(config, runtime, self.events, self.state, checker, clock, sleep)

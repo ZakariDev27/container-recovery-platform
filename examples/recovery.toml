@@ -9,6 +9,7 @@ state_dir = "./state"          # supervisor state, event log, logs of failed con
 backup_dir = "./backups"       # volume archives and their manifests
 check_interval = 5             # seconds between supervisor passes
 helper_image = "alpine:3.20"   # small image used to read and write volumes
+# alert_webhook = "https://hooks.slack.com/services/..."   # get told when recovery fails
 
 # --- a stateless web server, checked over HTTP ---------------------------
 [services.web]
@@ -35,7 +36,7 @@ volumes = ["db-data:/var/lib/postgresql/data"]
 
 [services.db.health]
 type = "exec"
-command = ["pg_isready", "-U", "postgres"]
+command = ["pg_isready", "-U", "postgres", "-h", "127.0.0.1"]
 failure_threshold = 3
 start_timeout = 60
 

@@ -81,6 +81,8 @@ class Config:
     backup_dir: Path = Path("./backups")
     check_interval: float = 5.0
     helper_image: str = "alpine:3.20"
+    alert_webhook: str = ""             # POST serious events here (Slack-compatible JSON)
+    alert_events: tuple[str, ...] = ()  # empty = the default set in alerts.DEFAULT_EVENTS
 
     def service(self, name: str) -> Service:
         try:
@@ -164,10 +166,13 @@ def parse(raw: dict, base: Path = Path(".")) -> Config:
         raise ConfigError("no services defined")
     services = {name: _parse_service(name, body) for name, body in services_raw.items()}
 
-    allowed = {"state_dir", "backup_dir", "check_interval", "helper_image"}
+    allowed = {"state_dir", "backup_dir", "check_interval", "helper_image",
+               "alert_webhook", "alert_events"}
     unknown = set(platform) - allowed
     if unknown:
         raise ConfigError(f"platform: unknown key(s): {', '.join(sorted(unknown))}")
+    if "alert_events" in platform:
+        platform["alert_events"] = tuple(platform["alert_events"])
     for key in ("state_dir", "backup_dir"):
         if key in platform:
             platform[key] = (base / platform[key]).resolve()

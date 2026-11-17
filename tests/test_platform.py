@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import http.server
+import json
 import socket
 import tempfile
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from recovery import config as cfg
 from recovery import health
+from recovery.alerts import WebhookNotifier
 from recovery.runtime import parse_sha256sum
 from recovery.state import EventLog, service_lock
 from recovery.storage import StorageError, archive_manifest, diff_manifests
@@ -492,6 +494,75 @@ class StorageTests(TmpCase):
         self.assertEqual(parsed, {"a.txt": "aa", "dir/b c.txt": "bb"})
         diff = diff_manifests({"a": "1", "b": "2"}, {"b": "9", "c": "3"})
         self.assertEqual(diff, ["missing: a", "unexpected: c", "content differs: b"])
+
+
+class AlertTests(TmpCase):
+    def _receiver(self):
+        received = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                received.append(json.loads(self.rfile.read(length)))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return received, f"http://127.0.0.1:{server.server_address[1]}/hook"
+
+    def test_webhook_gets_serious_events_only(self):
+        received, url = self._receiver()
+        events = EventLog(None)
+        events.listeners.append(WebhookNotifier(url))
+        events.emit("replaced", "db", generation=2)
+        events.emit("circuit_opened", "db", reason="container exited", replacements=3)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["event"], "circuit_opened")
+        self.assertEqual(received[0]["service"], "db")
+        self.assertIn("db: circuit_opened", received[0]["text"])
+
+    def test_supervisor_alerts_when_it_gives_up(self):
+        received, url = self._receiver()
+        config = cfg.parse(
+            {"platform": {"state_dir": "state", "backup_dir": "backups", "alert_webhook": url},
+             "services": {"db": {"image": "x", "health": {"start_timeout": 2}}}},
+            base=self.tmp,
+        )
+        clock = Clock()
+        runtime = FakeRuntime(self.tmp / "volumes")
+        sup = Supervisor(config, runtime, clock=clock, sleep=clock.sleep)
+        sup.up()
+        runtime.health_on_start = lambda rt, svc: "unhealthy"
+        runtime.kill("crp-db")
+        for _ in range(5):
+            sup.tick()
+        kinds = [e["event"] for e in received]
+        self.assertEqual(kinds.count("circuit_opened"), 1)
+        self.assertEqual(kinds.count("replace_failed"), 3)
+
+    def test_dead_webhook_does_not_break_recovery(self):
+        config = cfg.parse(
+            {"platform": {"state_dir": "state", "backup_dir": "backups",
+                          "alert_webhook": "http://127.0.0.1:9/nothing-here"},
+             "services": {"db": {"image": "x", "health": {"start_timeout": 2}}}},
+            base=self.tmp,
+        )
+        clock = Clock()
+        runtime = FakeRuntime(self.tmp / "volumes")
+        sup = Supervisor(config, runtime, clock=clock, sleep=clock.sleep)
+        sup.up()
+        runtime.health_on_start = lambda rt, svc: "unhealthy"
+        runtime.kill("crp-db")
+        with self.assertLogs("recovery", level="WARNING"):
+            self.assertEqual(sup.tick()["db"], "replace-failed")
+        runtime.health_on_start = lambda rt, svc: "healthy"
+        self.assertEqual(sup.tick()["db"], "replaced")
 
 
 class EndToEndRecoveryTests(TmpCase):

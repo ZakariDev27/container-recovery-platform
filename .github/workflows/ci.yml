@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e .
+      - run: python -W error -m unittest -v
+      - run: crp -c examples/recovery.toml backups
+
+  docker:
+    name: Recovery against real Docker and PostgreSQL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: docker pull -q alpine:3.20 && docker pull -q postgres:16-alpine
+      - name: Kill, corrupt, and recover real containers
+        env:
+          CRP_DOCKER_TESTS: "1"
+          CRP_POSTGRES_TESTS: "1"
+        run: python -m unittest -v tests.test_docker_integration

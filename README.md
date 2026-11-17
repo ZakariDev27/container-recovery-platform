@@ -1,5 +1,7 @@
 # Container Recovery Platform
 
+[![CI](https://github.com/ZakariDev27/container-recovery-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/ZakariDev27/container-recovery-platform/actions/workflows/ci.yml)
+
 Keeps Docker services alive and their data recoverable:
 
 - **Health checks** — HTTP, TCP, a command inside the container, or the image's own `HEALTHCHECK`.
@@ -81,6 +83,10 @@ A paused container counts as unhealthy but is not replaced on the spot, since a 
 
 Scheduled backups are taken only while the service is healthy, so a broken state is never captured as the newest backup. Retention keeps the newest `keep` backups and never deletes the newest one that passed a restore test.
 
+## Alerts
+
+Set `platform.alert_webhook` to a URL and the platform POSTs a JSON message there whenever something needs attention: a replacement that failed, a storage restore, a backup that failed its restore test, or a service it has given up on. The body has a `text` field, so a Slack incoming-webhook URL works as is. Routine events (a successful replacement, a new backup) are not sent. An unreachable webhook is logged and never interrupts recovery.
+
 ## Commands
 
 | Command | What it does |
@@ -113,6 +119,8 @@ See `examples/recovery.toml` for a commented example. Paths are relative to the 
 | `platform.backup_dir` | `./backups` | Backup archives |
 | `platform.check_interval` | `5` | Seconds between passes |
 | `platform.helper_image` | `alpine:3.20` | Image used to read and write volumes (needs `sh`, `tar`, `find`, `sha256sum`) |
+| `platform.alert_webhook` | – | URL that receives serious events as JSON |
+| `platform.alert_events` | see `recovery/alerts.py` | Which events are sent |
 | `services.<name>.image` | required | Image to run |
 | `services.<name>.command`, `ports`, `env`, `volumes`, `network`, `extra_args` | empty | Passed to `docker run`; volumes must be named volumes (`name:/path`) |
 | `health.type` | `docker` | `http`, `tcp`, `exec`, or `docker` |
@@ -140,15 +148,21 @@ HTTP and TCP checks run from the machine running `crp`, so point them at publish
 
 ```sh
 python -m unittest                      # unit and scenario tests, no Docker needed
-CRP_DOCKER_TESTS=1 python -m unittest tests.test_docker_integration   # against a real Docker engine
+
+# against a real Docker engine
+CRP_DOCKER_TESTS=1 CRP_POSTGRES_TESTS=1 python -m unittest tests.test_docker_integration
 ```
 
-The default suite runs the recovery logic on an in-memory engine with real directories as volumes, so archives, checksums, restore tests, and restores are exercised for real. The integration test drives an actual Docker engine through start, backup, restore test, kill, replacement, data loss, and storage recovery. `CRP_TEST_IMAGE` overrides the image it uses (default `alpine:3.20`).
+- **Unit and scenario tests** run the recovery logic on an in-memory engine with real directories as volumes, so archives, checksums, restore tests, and restores are exercised for real.
+- **Docker test** drives an actual engine through start, backup, restore test, kill, replacement, data loss, and storage recovery.
+- **PostgreSQL test** loads 5,000 rows into a real database, backs it up live, deletes its control file, kills it, and checks that the platform restores the data directory and every row is back.
+
+All three run on every push in GitHub Actions. `CRP_TEST_IMAGE` and `CRP_POSTGRES_IMAGE` override the images used.
 
 ## Limits
 
 - Single host, Docker only. One supervisor per config file.
-- Backups are file-level copies of volumes. For databases, use `backup.pause` and a `verify_command`, or back up a dump directory the database writes to.
+- Backups are file-level copies of volumes. With `backup.pause` the copy is crash-consistent, which PostgreSQL recovers from (this is tested); a database without crash recovery needs a dump-based backup instead.
 - Replacement stops the old container before starting the new one (they share ports and volumes), so there is a short gap in service.
 - File names containing newlines are not supported in volume manifests.
 
@@ -162,7 +176,8 @@ recovery/
   replacer.py    replacement containers
   storage.py     backup, restore test, restore, retention
   supervisor.py  the recovery ladder and the watch loop
-  state.py       persisted state and event log
+  state.py       persisted state, event log, per-service locks
+  alerts.py      webhook alerts
   cli.py         the crp command
 tests/
 examples/recovery.toml
