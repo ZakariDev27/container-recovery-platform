@@ -1,6 +1,8 @@
 """The supervisor: watches health, replaces containers, escalates to storage recovery.
 
-Recovery ladder for a service that keeps failing, within ``recovery.window``:
+Recovery ladder for a service that keeps failing. Replacements are counted
+within ``recovery.window``; the count is cleared once the service has stayed
+healthy for ``recovery.stable_after``:
 
 1. Replace the container (volumes carried over).
 2. After ``restore_storage_after`` replacements, restore volumes from the
@@ -19,7 +21,7 @@ from .config import Config, Service
 from .health import check as default_check
 from .replacer import Checker, Replacer
 from .runtime import EngineError, Runtime
-from .state import EventLog, StateStore
+from .state import EventLog, StateStore, service_lock
 from .storage import StorageError, StorageManager
 
 
@@ -47,20 +49,27 @@ class Supervisor:
     def up(self, names: list[str] | None = None) -> dict[str, bool]:
         results = {}
         for service in self._select(names):
-            results[service.name] = self.replacer.start(service)
+            with self.locked(service):
+                results[service.name] = self.replacer.start(service)
         self.state.save()
         return results
 
+    def locked(self, service: Service, blocking: bool = True):
+        """Hold the service's lock; use around any manual action on it."""
+        return service_lock(self.config.state_dir, service.name, blocking)
+
     def down(self, names: list[str] | None = None) -> None:
         for service in self._select(names):
-            self.runtime.stop(service.container_name, service.recovery.stop_timeout)
-            self.runtime.remove(service.container_name)
+            with self.locked(service):
+                self.runtime.stop(service.container_name, service.recovery.stop_timeout)
+                self.runtime.remove(service.container_name)
             self.events.emit("stopped", service.name)
 
     def reset(self, name: str) -> None:
         """Close the circuit and forget the failure history for a service."""
         st = self.state.get(self.config.service(name).name)
         st.circuit_open = False
+        st.healthy_since = None
         st.failures = 0
         st.replacements.clear()
         st.restores.clear()
@@ -78,7 +87,9 @@ class Supervisor:
         outcome = {}
         for service in self.config.services.values():
             try:
-                outcome[service.name] = self._tick_service(service)
+                with self.locked(service, blocking=False) as acquired:
+                    # busy: a manual backup/restore/replace is running; leave it alone
+                    outcome[service.name] = self._tick_service(service) if acquired else "busy"
             except EngineError as exc:
                 self.events.emit("engine_error", service.name, error=str(exc))
                 outcome[service.name] = "engine-error"
@@ -93,9 +104,18 @@ class Supervisor:
         result = self.checker(service, self.runtime)
         if result.ok:
             st.failures = 0
+            now = self.clock()
+            if st.healthy_since is None:
+                st.healthy_since = now
+            if st.replacements and now - st.healthy_since >= service.recovery.stable_after:
+                # Stayed healthy: the incident is over, so the next one starts fresh.
+                st.replacements.clear()
+                st.restores.clear()
+                self.events.emit("incident_closed", service.name)
             self._backup_if_due(service)
             return "healthy"
 
+        st.healthy_since = None
         st.failures += 1
         self.events.emit(
             "check_failed", service.name, detail=result.detail,

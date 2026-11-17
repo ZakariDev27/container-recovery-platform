@@ -32,6 +32,9 @@ Each pass of `crp watch` runs every service's health check.
 | Container exited or missing | Replace immediately |
 | `restore_storage_after` replacements in `window` did not fix it | Restore volumes from the newest restore-tested backup, then replace |
 | `max_replacements` replacements in `window` | Open the circuit: stop trying, leave the evidence, wait for `crp reset` |
+| Healthy for `stable_after` seconds after a replacement | The incident is over; the replacement count starts from zero next time |
+
+A paused container counts as unhealthy but is not replaced on the spot, since a backup may have paused it. While a manual `crp backup`, `restore`, `replace`, or `drill` is working on a service, a running `crp watch` skips that service.
 
 **Replacement.** The old container's last 200 log lines are saved to `state/forensics/`, it is stopped and renamed `crp-<service>-failed-<generation>`, and a new `crp-<service>` is started with the same named volumes. The newest `keep_failed` failed containers are kept; older ones are removed. A replacement counts as successful only once the new container passes its health check within `start_timeout`.
 
@@ -93,6 +96,7 @@ See `examples/recovery.toml` for a commented example. Paths are relative to the 
 | `recovery.max_replacements` | `3` | Replacements per window before the circuit opens |
 | `recovery.window` | `600` | Seconds |
 | `recovery.restore_storage_after` | `2` | Replacements in the window before volumes are restored |
+| `recovery.stable_after` | `120` | Seconds of continuous health after which the replacement history is cleared |
 | `recovery.keep_failed` | `1` | Failed containers kept |
 | `recovery.stop_timeout` | `10` | Seconds given to a container to stop |
 | `backup.interval` | `0` | Seconds between scheduled backups; `0` is manual only |
@@ -101,7 +105,7 @@ See `examples/recovery.toml` for a commented example. Paths are relative to the 
 | `backup.pause` | `false` | Pause the container during the copy |
 | `backup.verify_command` | – | Extra check run against the restored copy |
 
-HTTP and TCP checks run from the machine running `crp`, so point them at published ports.
+HTTP and TCP checks run from the machine running `crp`, so point them at published ports. HTTP checks connect directly and ignore proxy environment variables.
 
 ## Tests
 

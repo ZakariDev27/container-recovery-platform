@@ -27,7 +27,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _http(url: str, expect: tuple[int, int], timeout: float) -> HealthResult:
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
     try:
         with opener.open(url, timeout=timeout) as resp:
             status = resp.status
@@ -56,6 +56,8 @@ def check(service: Service, runtime: Runtime) -> HealthResult:
     state = runtime.inspect(service.container_name)
     if state is None:
         return HealthResult(False, "container missing", down=True)
+    if state.status == "paused":
+        return HealthResult(False, "container paused")
     if not state.running:
         return HealthResult(False, f"container {state.status}", down=True)
 

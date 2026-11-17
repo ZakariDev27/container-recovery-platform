@@ -90,7 +90,8 @@ def cmd_watch(sup: Supervisor, args) -> int:
 
 def cmd_replace(sup: Supervisor, args) -> int:
     service = sup.config.service(args.service)
-    ok = sup.replacer.replace(service, "manual replace")
+    with sup.locked(service):
+        ok = sup.replacer.replace(service, "manual replace")
     sup.state.save()
     print(f"{service.name}: {'replaced, healthy' if ok else 'replacement FAILED'}")
     return 0 if ok else 1
@@ -98,7 +99,8 @@ def cmd_replace(sup: Supervisor, args) -> int:
 
 def cmd_backup(sup: Supervisor, args) -> int:
     service = sup.config.service(args.service)
-    record = sup.storage.backup(service, verify=False if args.no_verify else None)
+    with sup.locked(service):
+        record = sup.storage.backup(service, verify=False if args.no_verify else None)
     print(_table([_backup_row(record)], BACKUP_COLUMNS))
     return 0 if (record.verified or args.no_verify or not service.backup.verify) else 1
 
@@ -135,7 +137,8 @@ def cmd_restore(sup: Supervisor, args) -> int:
         sup.storage.restore(service, record.id, allow_unverified=args.allow_unverified)
         restored.append(True)
 
-    ok = sup.replacer.replace(service, f"manual restore of {record.id}", restore)
+    with sup.locked(service):
+        ok = sup.replacer.replace(service, f"manual restore of {record.id}", restore)
     sup.state.save()
     if not restored:
         print(f"{service.name}: restore of {record.id} FAILED (see events)")
@@ -151,7 +154,8 @@ def cmd_drill(sup: Supervisor, args) -> int:
         if not service.volumes:
             continue
         try:
-            record = sup.storage.backup(service, verify=True)
+            with sup.locked(service):
+                record = sup.storage.backup(service, verify=True)
         except StorageError as exc:
             failed += 1
             rows.append({"service": service.name, "backup": "-", "restore-tested": "FAIL", "detail": str(exc)})

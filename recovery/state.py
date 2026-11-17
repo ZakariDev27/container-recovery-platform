@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ class ServiceState:
     replacements: list[float] = field(default_factory=list)
     restores: list[float] = field(default_factory=list)
     circuit_open: bool = False
+    healthy_since: float | None = None
 
 
 def write_json_atomic(path: Path, data) -> None:
@@ -27,6 +29,32 @@ def write_json_atomic(path: Path, data) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
     os.replace(tmp, path)
+
+
+@contextlib.contextmanager
+def service_lock(state_dir: Path, name: str, blocking: bool = True):
+    """Cross-process lock for one service. Yields False if it is busy (non-blocking only).
+
+    Stops a running supervisor and a manual command (backup, restore, replace)
+    from acting on the same service at the same time.
+    """
+    try:
+        import fcntl
+    except ImportError:  # not available on this platform: no locking
+        yield True
+        return
+    path = state_dir / "locks" / f"{name}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 class StateStore:

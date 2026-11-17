@@ -13,7 +13,7 @@ from pathlib import Path
 from recovery import config as cfg
 from recovery import health
 from recovery.runtime import parse_sha256sum
-from recovery.state import EventLog
+from recovery.state import EventLog, service_lock
 from recovery.storage import StorageError, archive_manifest, diff_manifests
 from recovery.supervisor import Supervisor
 
@@ -119,6 +119,28 @@ class HealthCheckTests(TmpCase):
         self.assertTrue(ok.ok)
         self.assertFalse(bad.ok)
         self.assertIn("503", bad.detail)
+
+    def test_http_check_ignores_proxy_settings(self):
+        import os
+        from unittest import mock
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        dead_proxy = {"http_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9",
+                      "no_proxy": "", "NO_PROXY": ""}
+        with mock.patch.dict(os.environ, dead_proxy):
+            result = health._http(f"http://127.0.0.1:{server.server_address[1]}/", (200, 399), 2)
+        self.assertTrue(result.ok, result.detail)
 
     def test_tcp_check(self):
         listener = socket.socket()
@@ -239,6 +261,49 @@ class ReplacementTests(TmpCase):
             self.assertEqual(sup.tick()["db"], "replaced")
         clock.now += 601
         runtime.kill("crp-db")
+        self.assertEqual(sup.tick()["db"], "replaced")
+
+    def test_history_clears_once_service_stays_healthy(self):
+        sup, runtime, clock, _ = make(self.tmp, volumes=[], recovery={"stable_after": 120})
+        sup.up()
+        for _ in range(5):  # five separate incidents, far more than max_replacements
+            runtime.kill("crp-db")
+            self.assertEqual(sup.tick()["db"], "replaced")
+            sup.tick()
+            clock.now += 121
+            self.assertEqual(sup.tick()["db"], "healthy")
+        self.assertEqual(sup.events.kinds("db").count("incident_closed"), 5)
+        self.assertFalse(sup.state.get("db").circuit_open)
+
+    def test_flapping_service_does_not_clear_history(self):
+        sup, runtime, clock, _ = make(self.tmp, volumes=[], recovery={"stable_after": 120})
+        sup.up()
+        outcomes = []
+        for _ in range(4):
+            runtime.kill("crp-db")
+            outcomes.append(sup.tick()["db"])
+            sup.tick()
+            clock.now += 30  # healthy, but never for long enough
+            sup.tick()
+        self.assertEqual(outcomes, ["replaced", "replaced", "replaced", "circuit-open"])
+
+    def test_paused_container_is_not_replaced_immediately(self):
+        sup, runtime, _, _ = make(self.tmp)
+        sup.up()
+        first_id = runtime.inspect("crp-db").id
+        runtime.pause("crp-db")
+        self.assertEqual(sup.tick()["db"], "unhealthy")
+        self.assertEqual(runtime.inspect("crp-db").id, first_id)
+        self.assertEqual([sup.tick()["db"] for _ in range(2)], ["unhealthy", "replaced"])
+
+    def test_supervisor_leaves_a_service_alone_while_it_is_locked(self):
+        sup, runtime, _, service = make(self.tmp)
+        sup.up()
+        runtime.kill("crp-db")
+        with service_lock(sup.config.state_dir, "db") as held:
+            self.assertTrue(held)
+            self.assertEqual(sup.tick()["db"], "busy")
+            self.assertEqual(runtime.inspect("crp-db").status, "exited")
         self.assertEqual(sup.tick()["db"], "replaced")
 
     def test_engine_failure_on_start_is_reported_not_raised(self):

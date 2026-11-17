@@ -33,6 +33,7 @@ class RecoveryConfig:
     max_replacements: int = 3     # per window, before the circuit opens
     window: float = 600.0         # seconds
     restore_storage_after: int = 2  # replacements in window before volumes are restored
+    stable_after: float = 120.0   # healthy this long => incident over, history cleared
     keep_failed: int = 1          # failed containers kept for forensics
     stop_timeout: int = 10
 

@@ -43,6 +43,7 @@ start_timeout = 60
 max_replacements = 4
 window = 900
 restore_storage_after = 2      # replacements that must fail before volumes are restored
+stable_after = 120             # healthy this long = incident over, counters cleared
 
 [services.db.backup]
 interval = 3600                # seconds between scheduled backups (0 = manual only)
