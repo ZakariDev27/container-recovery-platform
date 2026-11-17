@@ -8,6 +8,35 @@ Keeps Docker services alive and their data recoverable:
 
 Python 3.11+ and the `docker` CLI. No other dependencies.
 
+## Demo
+
+Output of `crp events` from a real run: a web service with a data volume, supervised by `crp watch`, with failures injected by hand.
+
+```
+# first healthy pass: back up the volume and prove the backup restores
+21:20:04  web  backup_created     backup=20261117T212004Z files=2
+21:20:04  web  backup_verified    restored and matched 2 file(s)
+
+# docker kill crp-web  -> replaced one second after detection
+21:20:09  web  check_failed       container exited
+21:20:10  web  replaced           generation=2  http status 200
+21:20:20  web  incident_closed
+
+# docker pause crp-web (a hang) -> replaced after three failed checks
+21:20:22  web  check_failed       container paused  failures=1/3
+21:20:24  web  check_failed       container paused  failures=2/3
+21:20:27  web  check_failed       container paused  failures=3/3
+21:20:30  web  replaced           generation=3  http status 200
+
+# files deleted from the volume -> a new container alone cannot fix it,
+# so the volume is restored from the tested backup
+21:20:55  web  check_failed       http status 404  failures=3/3
+21:21:08  web  replace_failed     generation=4  not healthy after 10s
+21:21:13  web  storage_restored   backup=20261117T212041Z
+21:21:15  web  replaced           generation=5  http status 200
+21:21:25  web  incident_closed
+```
+
 ## Quick start
 
 ```sh
@@ -138,3 +167,7 @@ recovery/
 tests/
 examples/recovery.toml
 ```
+
+## License
+
+MIT. See `LICENSE`.
