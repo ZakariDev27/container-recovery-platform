@@ -1,0 +1,54 @@
+# Example configuration. Copy to ./recovery.toml and adjust.
+#
+#   crp up        start everything
+#   crp watch     supervise (health checks, replacement, scheduled backups)
+#   crp drill     prove that backups can be restored
+
+[platform]
+state_dir = "./state"          # supervisor state, event log, logs of failed containers
+backup_dir = "./backups"       # volume archives and their manifests
+check_interval = 5             # seconds between supervisor passes
+helper_image = "alpine:3.20"   # small image used to read and write volumes
+
+# --- a stateless web server, checked over HTTP ---------------------------
+[services.web]
+image = "nginx:1.27-alpine"
+ports = ["8080:80"]
+
+[services.web.health]
+type = "http"
+url = "http://127.0.0.1:8080/"
+timeout = 3
+failure_threshold = 3          # consecutive failures before replacement
+start_timeout = 30             # a new container must pass a check within this
+
+[services.web.recovery]
+max_replacements = 3           # per window; after that the circuit opens
+window = 600
+keep_failed = 1                # failed containers kept around for inspection
+
+# --- a database with a volume, checked from inside the container ---------
+[services.db]
+image = "postgres:16-alpine"
+env = { POSTGRES_PASSWORD = "change-me" }
+volumes = ["db-data:/var/lib/postgresql/data"]
+
+[services.db.health]
+type = "exec"
+command = ["pg_isready", "-U", "postgres"]
+failure_threshold = 3
+start_timeout = 60
+
+[services.db.recovery]
+max_replacements = 4
+window = 900
+restore_storage_after = 2      # replacements that must fail before volumes are restored
+
+[services.db.backup]
+interval = 3600                # seconds between scheduled backups (0 = manual only)
+keep = 5
+verify = true                  # restore-test every backup as soon as it is taken
+pause = true                   # freeze the container while its volume is copied
+# Optional application-level check, run in the service image against the
+# restored copy of the volume (mounted at the same path):
+# verify_command = ["sh", "-c", "test -f /var/lib/postgresql/data/PG_VERSION"]
